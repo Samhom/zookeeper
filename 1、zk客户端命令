@@ -1,0 +1,22 @@
+创建节点：
+    create [-s] [-e] path data acl
+    -s或-e分别指定节点特性，顺序或临时节点，若不指定，则表示持久节点；acl用来进行权限控制。
+    如 create /zk-permanent 123 表示创建一个数据内容为123的永久节点
+读取节点：
+    ls  get
+    ls  命令可以列出 Zookeeper 指定节点下的所有子节点，只能查看指定节点下的第一级的所有子节点；
+    get 命令可以获取 Zookeeper 指定节点的数据内容和属性信息。
+    若想获取/zk-permanent的数据内容和属性，可使用命令：get /zk-permanent 第一行是数据内容 接下来是其他的属性信息
+更新节点：
+    set path data [version]
+    data就是要更新的新内容，version表示数据版本，如将/zk-permanent节点的数据更新为456，可以使用命令：set /zk-permanent 456
+    会发现该几点的 属性 dataVersion = 1
+删除节点:
+    delete path [version]
+    若删除节点存在子节点，那么无法删除该节点，必须先删除子节点，再删除父节点。
+节点监控:
+    stat -w /master
+        监听在 /master 节点上，如果 /master 节点被别的客户端删除，则监控在该节点上的 进程 会监听到 type:NodeDeleted 事件
+    ls -w /workers
+        节点 /workers 下的子节点的变更状态，如果别的客户端新建或者删除了 该节点下的子节点，那么监听在该节点上的 进程 会收到 type:NodeChildrenChanged 类型的事件
+
