@@ -1,0 +1,45 @@
+1、master-worker模型有三个角色：
+    Master
+        master监视新的worker和任务，并分配任务给可用的worker。
+    Worker
+        worker向系统注册它们自己的信息，确保master能“看见”它们并能执行任务，同时监视新的任务。
+    Client
+        客户端创建新的任务并等待系统的响应。
+2、master 角色
+    一个进程要成为 master，需要在zookeeper锁住领导权。要达到此目的，需要创建一个名为 /master 的临时节点：
+        create -e /master "master1.example.com:2223"  节点信息可以设置为主机名＋监听的端口号
+    其他进程再尝试创建 /master 节点的话，会有提示：Node already exists: /master
+    这时创建 /master 节点失败的进程可以在 /master 节点上设置一个 watch，如果已经创建 /master 节点的进程关闭了，该节点会收到相应的事件通知，然后再来尝试创建 /master 即可
+        stat -w /master
+3、工人、任务和指派关系
+    创建三个不包含数据信息的持久化节点：/workers、/tasks 和 /assign。
+    通过这些节点来告诉我们哪些 worker 是可用的，还有哪些任务（tasks）等着被分配（assign），同时分配给 worker 的任务。
+    主节点（即 /master 节点）需要监视节点 /workers、/tasks 下的孩子节点的变化：ls - /workers、ls -w /tasks
+4、Worker 角色
+    worker 的第一步就是通知 master 它能执行任务。通过在 /workers 下面创建“临时节点”来达到此目的。Worker 使用它们的主机名来标示自己，如：
+        create -e /workers/worker1.example.com "worker1.example.com:2224"
+    此后，监听在 /workers 节点上的 master 节点会收到 WATCHER: WatchedEvent state:SyncConnected type:NodeChildrenChanged path:/workers
+    接下来，worker 需要创建一个父节点：/assign/worker1.example.com，为的是要接受任务分配。同时，通过 ls 命令来监视新的任务的分配：
+        ls -w /assign/worker1.example.com
+    这样，worker 现在准备好接受任务分配了。
+5、Client 角色
+    接下来需要客户端向系统中增加任务。
+    客户端通过在 /tasks 节点下创建一个数据内容为任务的实际组成的顺序性子节点，来通知 master 把任务分配给可以接受任务的 worker：
+        create -s /tasks/task- "具体任务内容"
+    之后客户端监听在自己创建的该顺序节点上：
+        ls -w /tasks/task-00000000000
+    接受任务的 work 进程在执行完该任务后，则在 /tasks 节点下的顺序性子节点下再创建一个状态的子节点（通过数据内容“done”等来标识状态）。
+    worker 角色检查新的任务（ls /tasks）并获取可用 work 角色列表（ls /workers），然后将任务进行分配：
+        create /assign/worker1.example.com/task-0000000000 ""
+    这样监听在 /assign/worker1.example.com 节点上的 worker 角色就收到了 type:NodeChildrenChanged 事件通知。
+    这样该 worker 节点检查 ls /assign/worker1.example.com，会发现一个子节点 [task-00000000000]
+    worker 执行完任务后在 /tasks/task-0000000000 下增加一个状态节点：create /tasks/task-0000000000/status "done"
+    这样监听在 /tasks/task-00000000000 节点上的客户端就会收到一个 type:NodeChildrenChanged 通知，通过检查其子节点 status 的内容数据（如：“done”）
+    来判断任务执行的结果。
+
+    以上就是任务的执行和节点状态的传递机制。
+
+
+
+
+
