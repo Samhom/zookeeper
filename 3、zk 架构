@@ -1,0 +1,40 @@
+zk 总体架构：
+    集群模式：
+        zk 客户端负责和 zk 集群加厚。zk 集群可以有两种模式：standalone 和 quorum。前者集群只有一个节点。生产环境中使用 quorum 模式。
+    Session：
+        Session 是 zk 中比较重要的一个概念，它是 zk 客户端会和集群中的某个节点建立的链接，同时也可以主动关闭这个链接。
+        如果 zk 节点没有在 session 关联的 timeout 时间内收客户端的消息，zk 节点也会主动关闭当前 session。
+        如果 zk 客户端发现连接的 zk 节点出错，则会自动尝试与其他的节点建立链接。
+    quorum 模式：
+        处于该模式下的 zk 集群会有多个 zk 节点，如：zk1、zk2、zk3，其中只能有一个节点是 leader 节点，剩下的节点是 follow 节点。
+        leader 节点可以处理读写请求，然后 follow 节点只能负责读请求，如果连接 follow 节点的客户端发送了一个写请求，囊额该 follow 节点
+        会把写请求转发给 leader 节点。
+    数据一致性：
+        全局可线性化写入：
+            先到达 leader 节点的写请求会被先处理，leader 节点决定写请求的执行顺序。
+        客户端 FIFO 顺序：
+            来自客户端的请求按照发送顺序执行。
+    集群配置文件（conf）：
+        ./zkServer.sh start    启动命令
+        ./zkServer.sh status   状态查看
+        node-00？：
+            # 这个时间是作为 leader 和 follower 节点之间或客户端与集群之间维持心跳的时间间隔，也就是每个 tickTime 时间就会发送一个心跳。
+            tickTime=2000
+            # 这个配置项是用来配置 follower 节点初始化连接时最长能忍受多少个心跳时间间隔数。当已经超过 initLimit 个心跳的时间（也就是 tickTime）
+            # 长度后 leader 节点还没有收到 follower 节点的返回信息，那么表明这个 follower 节点连接失败。
+            initLimit=10
+            # 这个配置项标识 leader 与 follower 之间发送消息，请求和应答时间长度，最长不能超过多少个 tickTime 的时间长度，总的时间长度就是 5*2000=10 秒
+            syncLimit=5
+            # 快照日志的存储路径
+            dataDir=/opt/zookeeper-版本/data
+            # 事务日志的存储路径，如果不配置这个那么事务日志会默认存储到 dataDir 制定的目录，这样会严重影响 zk 的性能，当 zk 吞吐量较大的时候，
+            # 产生的事务日志、快照日志太多
+            dataLogDir=/opt/zookeeper-版本/logs
+            # 这个端口就是客户端连接 zk 服务器的端口，zk 会监听这个端口，接受客户端的访问请求，不同节点使用不同的端口
+            clientPort=2181
+            # server.1 这个1是服务器的标识也可以是其他的数字，表示这个是第几号服务器，用来标识服务器，这个标识要写到快照目录下(dataDir)myid文件里
+            # IP 为集群里的 IP 地址，第一个端口是 master 和 slave 之间的通信端口，默认是 2888，第二个端口是 leader 选举的端口，
+            # 集群刚启动的时候选举或者 leader 挂掉之后进行新的选举的端口默认是 3888，不同节点的配置是一样的
+            server.1=ip1:2888:3888
+            server.2=ip2:2888:3888
+            server.3=ip3:2888:3888
