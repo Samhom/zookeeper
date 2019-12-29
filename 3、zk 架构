@@ -1,10 +1,6 @@
 zk 总体架构：
     集群模式：
         zk 客户端负责和 zk 集群加厚。zk 集群可以有两种模式：standalone 和 quorum。前者集群只有一个节点。生产环境中使用 quorum 模式。
-    Session：
-        Session 是 zk 中比较重要的一个概念，它是 zk 客户端会和集群中的某个节点建立的链接，同时也可以主动关闭这个链接。
-        如果 zk 节点没有在 session 关联的 timeout 时间内收客户端的消息，zk 节点也会主动关闭当前 session。
-        如果 zk 客户端发现连接的 zk 节点出错，则会自动尝试与其他的节点建立链接。
     quorum 模式：
         处于该模式下的 zk 集群会有多个 zk 节点，如：zk1、zk2、zk3，其中只能有一个节点（server）是 leader 节点，剩下的节点是 follow 节点。
         leader 节点可以处理读写请求，然后 follow 节点只能负责读请求，如果连接 follow 节点的客户端发送了一个写请求，囊额该 follow 节点
@@ -23,33 +19,183 @@ zk 总体架构：
         一旦服务端成功地应用了一个事务，并完成对客户端的响应，那么该事务所引起的服务端状态变更将会一直被保留，除非有另一个事务对其进行了变更。
     实时性:
         zk 保证在一定的时间段内，客户端最终一定能够从服务端上读取到最新的数据状态。
+Session：
+    session：
+            Session 是 zk 中比较重要的一个概念，一个客户端连接是指客户端和服务器某个节点之间的一个 TCP 长连接，同时也可以主动关闭这个链接。
+        通过这个连接，客户端能够通过心跳检测与服务器保持有效的会话，也能够向Zookeeper 服务器发送请求并接受响应，同时还能够通过该连接接
+        收来自服务器的Watch事件通知。Session 的 sessionTimeout 值用来设置一个客户端会话的超时时间。当由于服务器压力太大、网络故障或是
+        客户端主动断开连接等各种原因导致客户端连接断开时，只要在sessionTimeout规定的时间内能够重新连接上集群中任意一台服务器，那么之前
+        创建的会话仍然有效。在为客户端创建会话之前，服务端首先会为每个客户端都分配一个sessionID。由于 sessionID 是 Zookeeper 会话的一个
+        重要标识，许多与会话相关的运行机制都是基于这个 sessionID 的，因此，无论是哪台服务器为客户端分配的 sessionID，都务必保证全局唯一。
+        如果 zk 节点没有在 session 关联的 timeout 时间内收客户端的消息，zk 节点也会主动关闭当前 session。
+        如果 zk 客户端发现连接的 zk 节点出错，则会自动尝试与其他的节点建立链接。
+会话：
+        客户端与服务端成功完成连接创建后，就创建了一个会话，会话在整个运行期间的生命周期中，会在不同的会话状态中之间进行切换，这些状态
+    可以分为 CONNECTING、CONNECTED、RECONNECTING、RECONNECTED、CLOSE 等。
+        一旦客户端开始创建 Zookeeper 对象，那么客户端状态就会变成 CONNECTING 状态，同时客户端开始尝试连接服务端，连接成功后，客户端状
+    态变为 CONNECTED，通常情况下，由于断网或其他原因，客户端与服务端之间会出现断开情况，一旦碰到这种情况，Zookeeper客户端会自动进行重
+    连服务，同时客户端状态再次变成 CONNCTING，直到重新连上服务端后，状态又变为 CONNECTED，在通常情况下，客户端的状态总是介于 CONNECTING 
+    和 CONNECTED 之间。但是，如果出现诸如会话超时、权限检查或是客户端主动退出程序等情况，客户端的状态就会直接变更为 CLOSE 状态。
+    
+    会话属性：
+        session 是 zk 中代表一个客户端会话的会话实体，有如下四个属性（SessionTrackerImpl.SessionImpl）：
+            ssionID：
+                会话 ID，唯一标识一个会话，每次客户端创建新的会话时，zk 都会为其分配一个全局唯一的 sessionID。
+            timeOut：
+                会话超时时间，客户端在构造 zk 实例时，会配置 sessionTimeout 参数用于指定会话的超时时间，客户端向服务端发送这个超时时间后，
+                服务端会根据自己的超时时间限制最终确定会话的超时时间。
+            tickTime：
+                下次会话超时时间点，为了便于 zk 对会话实行”分桶策略”管理，同时为了高效低耗地实现会话的超时检查与清理，zk 会为每个会话标记
+                一个下次会话超时时间点，其值大致等于当前时间加上 timeOut。
+            isClosing：
+                标记一个会话是否已经被关闭，当服务端检测到会话已经超时失效时，会将该会话的 isClosing 标记为”已关闭”，这样就能确保不再处理
+                来自该会话的心情求了。
+
+            zk 为了保证请求会话的全局唯一性，在 SessionTracker 初始化时，调用 initializeNextSession 方法生成一个 sessionID，之后在 zk 运
+        行过程中，会在该 sessionID 的基础上为每个会话进行分配，初始化算法如下:
+            // id表示配置在myid文件中的值，通常是一个整数，如1、2、3。
+            // 该算法的高8位确定了所在机器，后56位使用当前时间的毫秒表示进行随机。
+            public static long initializeNextSession(long id) {
+              long nextSid = 0;
+              // 无符号右移8位使为了避免左移24后，再右移8位出现负数而无法通过高8位确定sid值
+              nextSid = (System.currentTimeMillis() << 24) >>> 8;
+              nextSid = nextSid | (id << 56);
+              return nextSid;
+            }
+    
+    会话管理：
+        主要包含：分桶策略、会话激活、超时检测。由类 SessionTrackerImpl 封装会话管理（不同于上述的会话属性）的一些属性：        
+            sessionsById	        key是sessionId，value是对应的会话
+            sessionSets	            key是某个过期时间，value是会话集合，表示这个过期时间过后就超时的会话集合
+            sessionsWithTimeout	    key是sessionId,value是该会话的超时周期(不是时间点)
+            nextSessionId	        一下个会话的id
+            nextExpirationTime	    下一次进行超时检测的时间
+            expirationInterval	    超时检测的周期，多久检测一次
+            expirer	                用于server检测client超时之后给client发送 会话关闭的请求
+            running	                超时检测的线程是否在运行
+            currentTime	            当前时间
+        分桶策略：
+                会话管理主要是通过 SessionTracker 来负责，其采用了分桶策略（将类似的会话放在同一区块中进行管理）进行管理，以便 zk 对会话
+            进行不同区块的隔离处理以及同一区块的统一处理。
+                zk 将所有的会话都分配在不同的区块一种，分配的原则是每个会话的下次超时时间点（ExpirationTime）。
+                SessionTrackerImpl.roundToInterval:
+                private long roundToInterval(long time) {
+                    // 按照整除expirationInterval 的时间来分桶
+                    return (time / expirationInterval + 1) * expirationInterval;
+                }
+        会话激活：
+                会了保持客户端会话的有效性，客户端会在会话超时时间过期范围内向服务端发送 PING 请求来保持会话的有效性（心跳检测）。同时，服务端
+            需要不断地接收来自客户端的心跳检测，并且需要重新激活对应的客户端会话，这个重新激活过程称为 TouchSession。会话激活不仅能够使服
+            务端检测到对应客户端的存活性，同时也能让客户端自己保持连接状态。
+            会话激活时机：
+                客户端向服务端发送请求，包括读写请求，就会触发会话激活。
+                客户端发现在 sessionTimeout/3 时间内尚未和服务端进行任何通信，那么就会主动发起 PING 请求，服务端收到该请求后，就会触发会话激活。
+        超时检测：
+                对于会话的超时检查而言，zk 使用 SessionTracker 来负责，SessionTracker 使用单独的线程（超时检查线程）专门进行会话超时检查，
+            即逐个一次地对会话桶中剩下的会话进行清理。等到下一次超时检测的周期，把对应的桶中的会话全部标记关闭，给对应 client 发送会话关
+            闭的请求。
+                当 SessionTracker 的会话超时线程检查出已经过期的会话后，就开始进行会话清理工作。
+    源码分析可参考：https://www.jianshu.com/p/594129a44814                
+
+集群角色：
+    leader：
+        职责：
+            负责响应所有对 zk 状态变更的请求。
+            事务请求的唯一调度和处理，保障集群处理事务的顺序性。
+            集群内各服务器的调度者。
+        leader 选举:
+                zk 最重要的技术之一，也是保障分布式数据一致性的关键所在。我们以三台机器为例，在服务器集群初始化阶段，当有一台服务器 Server1 
+            启动时候是无法完成选举的，当第二台机器 Server2 启动后两台机器能互相通信，每台机器都试图找到一个 leader，于是便进入了 leader 
+            选举流程：
+                ·每个 server 发出一个投票：
+                    投票的最基本元素是（SID-服务器id,ZXID-事物id）
+                ·接受来自各个服务器的投票
+                ·处理投票：
+                    优先检查 ZXID(数据越新ZXID越大),ZXID比较大的作为leader，ZXID一样的情况下比较SID
+                ·统计投票：
+                    这里有个过半的概念，大于集群机器数量的一半，即大于或等于（n/2+1）,我们这里的由三台，大于等于2即为达到“过半”的要求。
+                    这里也有引申到为什么 zk 集群推荐是单数。
             
-            
-            
-            
-            
-            
-    集群配置文件（conf）：
-        ./zkServer.sh start    启动命令
-        ./zkServer.sh status   状态查看
-        node-00？：
-            # 这个时间是作为 leader 和 follower 节点之间或客户端与集群之间维持心跳的时间间隔，也就是每个 tickTime 时间就会发送一个心跳。
-            tickTime=2000
-            # 这个配置项是用来配置 follower 节点初始化连接时最长能忍受多少个心跳时间间隔数。当已经超过 initLimit 个心跳的时间（也就是 tickTime）
-            # 长度后 leader 节点还没有收到 follower 节点的返回信息，那么表明这个 follower 节点连接失败。
-            initLimit=10
-            # 这个配置项标识 leader 与 follower 之间发送消息，请求和应答时间长度，最长不能超过多少个 tickTime 的时间长度，总的时间长度就是 5*2000=10 秒
-            syncLimit=5
-            # 快照日志的存储路径
-            dataDir=/opt/zookeeper-版本/data
-            # 事务日志的存储路径，如果不配置这个那么事务日志会默认存储到 dataDir 制定的目录，这样会严重影响 zk 的性能，当 zk 吞吐量较大的时候，
-            # 产生的事务日志、快照日志太多
-            dataLogDir=/opt/zookeeper-版本/logs
-            # 这个端口就是客户端连接 zk 服务器的端口，zk 会监听这个端口，接受客户端的访问请求，不同节点使用不同的端口
-            clientPort=2181
-            # server.1 这个1是服务器的标识也可以是其他的数字，表示这个是第几号服务器，用来标识服务器，这个标识要写到快照目录下(dataDir)myid文件里
-            # IP 为集群里的 IP 地址，第一个端口是 master 和 slave 之间的通信端口，默认是 2888，第二个端口是 leader 选举的端口，
-            # 集群刚启动的时候选举或者 leader 挂掉之后进行新的选举的端口默认是 3888，不同节点的配置是一样的
-            server.1=ip1:2888:3888
-            server.2=ip2:2888:3888
-            server.3=ip3:2888:3888
+            如下示例：   
+             集群数量	        至少正常运行数量	    允许挂掉的数量
+                2	     2的半数为1，半数以上最少为2	    0
+                3	     3的半数为1.5，半数以上最少为2	    1
+                4	     4的半数为2，半数以上最少为3	    1
+                5	     5的半数为2.5，半数以上最少为3	    2
+                6	     6的半数为3，半数以上最少为4	    2
+                
+                可以发现，3 台服务器和 4 台服务器都最多允许 1 台服务器挂掉，5 台服务器和 6 台服务器都最多允许 2 台服务器挂掉,明显4台服务器成本
+            高于 3 台服务器成本，6 台服务器成本高于 5 服务器成本。这是由于半数以上投票通过决定的。
+    
+    follower：
+            除了响应本服务器上的读请求外，follower 还要处理leader 的提议，并在 leader 提交该提议时在本地也进行提交。另外需要注意的是，
+        leader 和 follower 构成ZooKeeper 集群的法定人数，也就是说，只有他们才参与新 leader的选举、响应 leader 的提议。
+    
+    observer：
+        充当一个观察者的角色。
+        如果 zk 集群的读取负载很高，或者客户端多到跨机房，可以设置一些 observer 服务器，以提高读取的吞吐量。
+            observer 不属于法定人数，即不参加选举也不响应提议，也不参与写操作的“过半写成功”策略；其次是 observer 不需要将事务持久化到磁盘，
+        一旦 observer 被重启，需要从 leader 重新同步整个名字空间。
+
+数据节点 Znode：
+    每个节点上都会保存自己的数据内容，同时还会保存一系列属性信息。
+    zk 规定节点的数据大小不能超过 1M，但实际上我们在 znode 的数据量应该尽可能小，因为数据过大会导致 zk 的性能明显下降。
+    节点类型：
+        可以分为持久节点、临时节点、顺序节点。
+        又可组合成四种类型：
+            PERSISTENT：
+                持久节点,节点创建后便一直存在于服务器上，直到有删除操作来主动删除该节点。
+                每次创建顺序节点时，zk 都会在路径后面自动添加上 10 位的数字，4字节。
+            PERSISTENT_SEQUENTIAL：
+                持久顺序节点,相比持久节点，其新增了顺序特性，每个父节点都会为它的第一级子节点维护一份顺序，用于记录每个子节点创建的先后顺序。
+                在创建节点时，会自动添加一个数字后缀，作为新的节点名，该数字后缀的上限是整形的最大值。
+            EPEMERAL：
+                临时节点，临时节点的生命周期与客户端会话绑定，客户端失效，节点会被自动清理。同时，zk 规定不能基于临时节点来创建子节点，
+                即临时节点只能作为叶子节点。
+            EPEMERAL_SEQUENTIAL：
+                临时顺序节点,在临时节点的基础添加了顺序特性。
+    节点属性：
+        dataVersion     数据版本号，每次对节点进行set操作，dataVersion的值都会增加1（即使设置的是相同的数据）。
+        cversion        子节点的版本号。当znode的子节点有变化时，cversion 的值就会增加1。
+        aclVersion      ACL的版本号，关于znode的ACL（Access Control List，访问控制）。
+        cZxid           Znode创建的事务id。
+        mZxid           Znode被修改的事务id，即每次对znode的修改都会更新mZxid。
+        ctime           Znode创建的时间戳。
+        mtime           Znode修改的时间戳。
+        dataLength      数据长度。
+        numChildren     子节点数量。
+        ephemeralOwner  如果znode是ephemeral类型节点，则这是znode所有者的 session ID。 如果znode不是ephemeral节点，则该字段设置为零。
+        
+            每一个 znode 都有一个 dataVersion，它随着每次数据变化而自增。zk 提供的一些 API 例如 setData 和 delete 根据版本号有条件地执行。
+        多个客户端对同一个 znode 进行操作时，版本号的使用就会显得尤为重要。例如，假设客户端 C1 对 znode /config 写入一些配置信息，如果另
+        一个客户端 C2 同时更新了这个 znode，此时 C1 的版本号已经过期，C1 调用 setData 一定不会成功。这正是版本机制有效避免了数据更新时出现
+        的先后顺序问题。在这个例子中，C1 在写入数据时使用的版本号无法匹配，使得操作失败。
+            对于 zk 来说，每次的变化都会产生一个唯一的事务 id，zxid（ZooKeeper Transaction Id）。通过 zxid，可以确定更新操作的先后顺序。
+        例如，如果zxid1小于zxid2，说明zxid1操作先于zxid2发生。zxid对于整个zk都是唯一的，即使操作的是不同的znode。
+            在集群模式下，客户端有多个服务器可以连接，当尝试连接到一个不同的服务器时，这个服务器的状态要与最后连接的服务器的状态要保持
+        一致。zk 正是使用 zxid 来标识这个状态，上图描述了客户端在重连情况下 zxid 的作用。
+
+集群配置文件（conf）：
+    ./zkServer.sh start    启动命令
+    ./zkServer.sh status   状态查看
+    node-00？：
+        # 这个时间是作为 leader 和 follower 节点之间或客户端与集群之间维持心跳的时间间隔，也就是每个 tickTime 时间就会发送一个心跳。
+        tickTime=2000
+        # 这个配置项是用来配置 follower 节点初始化连接时最长能忍受多少个心跳时间间隔数。当已经超过 initLimit 个心跳的时间（也就是 tickTime）
+        # 长度后 leader 节点还没有收到 follower 节点的返回信息，那么表明这个 follower 节点连接失败。
+        initLimit=10
+        # 这个配置项标识 leader 与 follower 之间发送消息，请求和应答时间长度，最长不能超过多少个 tickTime 的时间长度，总的时间长度就是 5*2000=10 秒
+        syncLimit=5
+        # 快照日志的存储路径
+        dataDir=/opt/zookeeper-版本/data
+        # 事务日志的存储路径，如果不配置这个那么事务日志会默认存储到 dataDir 制定的目录，这样会严重影响 zk 的性能，当 zk 吞吐量较大的时候，
+        # 产生的事务日志、快照日志太多
+        dataLogDir=/opt/zookeeper-版本/logs
+        # 这个端口就是客户端连接 zk 服务器的端口，zk 会监听这个端口，接受客户端的访问请求，不同节点使用不同的端口
+        clientPort=2181
+        # server.1 这个1是服务器的标识也可以是其他的数字，表示这个是第几号服务器，用来标识服务器，这个标识要写到快照目录下(dataDir)myid文件里
+        # IP 为集群里的 IP 地址，第一个端口是 master 和 slave 之间的通信端口，默认是 2888，第二个端口是 leader 选举的端口，
+        # 集群刚启动的时候选举或者 leader 挂掉之后进行新的选举的端口默认是 3888，不同节点的配置是一样的
+        server.1=ip1:2888:3888
+        server.2=ip2:2888:3888
+        server.3=ip3:2888:3888
