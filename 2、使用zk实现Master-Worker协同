@@ -28,8 +28,8 @@
         create -s /tasks/task- "具体任务内容"
     之后客户端监听在自己创建的该顺序节点上：
         ls -w /tasks/task-00000000000
-    接受任务的 work 进程在执行完该任务后，则在 /tasks 节点下的顺序性子节点下再创建一个状态的子节点（通过数据内容“done”等来标识状态）。
-    worker 角色检查新的任务（ls /tasks）并获取可用 work 角色列表（ls /workers），然后将任务进行分配：
+    
+    master 角色检查新的任务（ls /tasks）并获取可用 work 角色列表（ls /workers），然后将任务进行分配：
         create /assign/worker1.example.com/task-0000000000 ""
     这样监听在 /assign/worker1.example.com 节点上的 worker 角色就收到了 type:NodeChildrenChanged 事件通知。
     这样该 worker 节点检查 ls /assign/worker1.example.com，会发现一个子节点 [task-00000000000]
